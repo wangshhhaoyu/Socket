@@ -372,10 +372,16 @@ static void handle_message(const std::shared_ptr<Client> &c, Message &m) {
         /*
          * 特殊约定: 载荷为 "who" 时表示客户端请求在线用户列表,
          * 此时回 USERLIST 而非 PONG。其余情况按心跳处理, 回显载荷。
+         *
+         * 两种情况都只用 send_frame 单播回**发起方那一条连接**,
+         * 绝不广播 —— 所以 ping 的探测过程与结果只有使用者本人看得见,
+         * 聊天室里的其他用户既看不到指令, 也看不到往返时延。
          */
         if (m.payload == "who") {
             send_frame(c, MSG_USERLIST, build_user_list(), now_ms(), "SERVER");
         } else {
+            log_line("收到 %s(id=%d) 的 ping 探测, 已单播回送 PONG(不广播)",
+                     c->nick.c_str(), c->id);
             send_frame(c, MSG_PONG, m.payload, now_ms(), "SERVER");
         }
         break;

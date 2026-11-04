@@ -311,6 +311,8 @@ static void print_help() {
         "  /test [n]       发送 n 条测试报文并统计丢失情况 (默认 20)\n"
         "  /stat           显示本端收发统计与丢包情况\n"
         "  /quit           退出聊天\n"
+        "  注: 内建命令是**本端行为**, 只对使用者本人可见, 不会广播给其他人;\n"
+        "      漏写开头的 '/' 也能识别 (如直接输入 ping 即等同 /ping)。\n"
         "=============================================\n\n");
 }
 
@@ -382,27 +384,41 @@ static void print_stat() {
     out_write(std::string(buf));
 }
 
-/* 处理一行输入; 返回 false 表示需要退出 */
-static bool handle_input(const std::string &line) {
-    if (line.empty()) return true;
+/*
+ * 执行一次 ping 探测 (测量本端到服务器的往返时延)。
+ *
+ * PING/PONG 是**点对点**的控制报文:
+ *   - 客户端把发送瞬间的微秒时间戳放进 PING 载荷;
+ *   - 服务端只把 PONG 回给发起这条 PING 的那个连接, 绝不转发给其他用户;
+ *   - 客户端也只在本地打印 RTT 结果, 不产生任何广播。
+ * 因此整条探测链路对其他用户完全不可见 —— 即"ping 仅使用该指令的用户可见"。
+ */
+static void do_ping() {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lld", (long long)now_us());
+    send_msg(MSG_PING, buf, now_ms(), nick_get());
+}
 
-    /* 内建命令以 '/' 开头 */
-    if (line[0] == '/') {
-        if (line == "/quit" || line == "/exit") {
-            send_msg(MSG_LOGOUT, "", now_ms(), nick_get());
-            return false;
-        } else if (line == "/help") {
-            print_help();
-        } else if (line == "/who") {
-            out_printf("(等待服务器返回在线用户列表...)\n");
-            send_msg(MSG_PING, "who", now_ms(), nick_get());
-        } else if (line == "/ping") {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%lld", (long long)now_us());
-            send_msg(MSG_PING, buf, now_ms(), nick_get());
-        } else if (line.compare(0, 5, "/test") == 0 &&
-                   (line.size() == 5 || line[5] == ' ' || line[5] == '\t' ||
-                    line[5] == '[')) {
+/* 执行一条内建命令; cmd 必须以 '/' 开头。返回 false 表示需要退出 */
+static bool exec_command(const std::string &cmd_in) {
+    /* 去掉命令末尾的多余空白, 便于 "/ping " 这类写法 */
+    std::string cmd = cmd_in;
+    size_t e = cmd.find_last_not_of(" \t");
+    cmd = (e == std::string::npos) ? std::string() : cmd.substr(0, e + 1);
+
+    if (cmd == "/quit" || cmd == "/exit") {
+        send_msg(MSG_LOGOUT, "", now_ms(), nick_get());
+        return false;
+    } else if (cmd == "/help") {
+        print_help();
+    } else if (cmd == "/who") {
+        out_printf("(等待服务器返回在线用户列表...)\n");
+        send_msg(MSG_PING, "who", now_ms(), nick_get());
+    } else if (cmd == "/ping") {
+        do_ping();
+    } else if (cmd.compare(0, 5, "/test") == 0 &&
+               (cmd.size() == 5 || cmd[5] == ' ' || cmd[5] == '\t' ||
+                cmd[5] == '[')) {
             /*
              * 报文的条数。容错地接受多种写法:
              *   /test        /test 100    /test 100条
@@ -412,21 +428,24 @@ static bool handle_input(const std::string &line) {
              */
             int n = 20;
             size_t p = 5;
-            while (p < line.size() &&
-                   (line[p] == ' ' || line[p] == '\t' || line[p] == '[')) ++p;
+            while (p < cmd.size() &&
+                   (cmd[p] == ' ' || cmd[p] == '\t' || cmd[p] == '[')) ++p;
             long v = 0;
             bool digits = false;
-            while (p < line.size() && line[p] >= '0' && line[p] <= '9') {
-                v = v * 10 + (line[p] - '0');
+            while (p < cmd.size() && cmd[p] >= '0' && cmd[p] <= '9') {
+                v = v * 10 + (cmd[p] - '0');
                 ++p;
                 digits = true;
                 if (v > 1000000) break;   /* 防止输入超长数字导致溢出 */
             }
             if (digits) n = (int)v;
             run_test(n);
-        } else if (line.compare(0, 5, "/nick") == 0 &&
-                   (line.size() == 5 || line[5] == ' ' || line[5] == '\t')) {
-            std::string n = (line.size() > 6) ? line.substr(6) : std::string();
+        } else if (cmd.compare(0, 5, "/nick") == 0 &&
+                   (cmd.size() == 5 || cmd[5] == ' ' || cmd[5] == '\t')) {
+            std::string n = (cmd.size() > 6) ? cmd.substr(6) : std::string();
+            /* 去掉名字前的多余空白 */
+            size_t nb = n.find_first_not_of(" \t");
+            n = (nb == std::string::npos) ? std::string() : n.substr(nb);
             /* 容错: 允许直接照抄 "/nick <名字>" 的写法, 去掉尖括号 */
             if (n.size() >= 2 && n[0] == '<' && n[n.size() - 1] == '>')
                 n = n.substr(1, n.size() - 2);
@@ -446,18 +465,108 @@ static bool handle_input(const std::string &line) {
                  */
                 send_msg(MSG_NICK_CHANGE, n, now_ms(), nick_get());
             }
-        } else if (line == "/stat") {
+        } else if (cmd == "/stat") {
             print_stat();
         } else {
             out_printf("未知命令, 输入 /help 查看帮助\n");
         }
         return true;
+}
+
+/*
+ * 判断一行输入是不是"漏写了 '/'"的内建命令, 并给出规范化后的命令行。
+ *
+ * 例如把 "/ping" 打成 "ping"、把 "/test 30" 打成 "test 30"。
+ * 这类输入的意图明显是执行命令而不是聊天, 因此应当**就地执行**,
+ * 而不是当成聊天消息广播出去 —— 否则其他用户会看到 "[时间] pc3: ping"
+ * 这种莫名其妙的聊天内容, 而发起者真正想看的往返时延反而没人看见。
+ *
+ * 为了不误伤正常聊天, 只认"完整合法"的命令形式:
+ *   - 无参命令 (help/who/stat/quit/exit/ping): 后面不能再跟内容;
+ *   - test: 只跟一个数字 (允许 [100] / 100条 的写法);
+ *   - nick: 必须跟一个名字。
+ * 其余情况(例如 "ping 你还好吗"、"test message one")仍是普通聊天消息。
+ */
+static bool parse_bare_command(const std::string &line, std::string &cmd) {
+    size_t sp = line.find_first_of(" \t");
+    std::string head = (sp == std::string::npos) ? line : line.substr(0, sp);
+    std::string rest = (sp == std::string::npos) ? std::string() : line.substr(sp + 1);
+
+    /* 去掉 rest 首尾空白 */
+    size_t b = rest.find_first_not_of(" \t");
+    if (b == std::string::npos) {
+        rest.clear();
+    } else {
+        size_t e = rest.find_last_not_of(" \t");
+        rest = rest.substr(b, e - b + 1);
+    }
+
+    if (head == "help" || head == "who" || head == "stat" ||
+        head == "quit" || head == "exit" || head == "ping") {
+        if (!rest.empty()) return false;      /* 后面还有内容 => 是聊天句子 */
+        cmd = "/" + head;
+        return true;
+    }
+
+    if (head == "test") {
+        std::string num = rest;
+        /* 允许 [100] 的写法 */
+        if (num.size() >= 2 && num[0] == '[' && num[num.size() - 1] == ']')
+            num = num.substr(1, num.size() - 2);
+        /* 允许 "100条" 这种带中文量词的写法: 砍掉尾部非 ASCII 字符 */
+        while (!num.empty() && (unsigned char)num[num.size() - 1] >= 0x80)
+            num.resize(num.size() - 1);
+        if (num.empty()) {
+            cmd = "/test";
+            return true;
+        }
+        for (size_t i = 0; i < num.size(); ++i) {
+            if (num[i] < '0' || num[i] > '9') return false;  /* 不是数字 => 聊天句子 */
+        }
+        cmd = "/test " + num;
+        return true;
+    }
+
+    if (head == "nick") {
+        if (rest.empty()) return false;        /* 没给名字, 仍按聊天处理 */
+        /*
+         * 裸写的 nick 只认"单个名字"(不含空格), 免得把 "nick is my dog"
+         * 这类普通聊天句子误当成改名命令。
+         */
+        if (rest.find_first_of(" \t") != std::string::npos) return false;
+        cmd = "/nick " + rest;
+        return true;
+    }
+
+    return false;
+}
+
+/* 处理一行输入; 返回 false 表示需要退出 */
+static bool handle_input(const std::string &line) {
+    if (line.empty()) return true;
+
+    /* 内建命令以 '/' 开头 */
+    if (line[0] == '/') {
+        return exec_command(line);
     }
 
     /*
-     * 少了 '/' 的命令: 例如把 "/test 30" 打成 "test 30"。
-     * 这类输入仍按普通聊天消息处理(绝不吞掉用户输入), 但额外给一句提示,
-     * 免得误以为程序卡住了。
+     * 少了 '/' 的命令: 例如把 "/ping" 打成 "ping"。
+     * 就地执行该命令 —— 内建命令是本端行为, 只对使用者本人可见,
+     * 绝不广播给聊天室里的其他人。
+     */
+    {
+        std::string cmd;
+        if (parse_bare_command(line, cmd)) {
+            out_printf("提示: 已按 %s 执行(该命令仅你自己可见, 不会广播给他人)\n",
+                       cmd.c_str());
+            return exec_command(cmd);
+        }
+    }
+
+    /*
+     * 首词与命令名相同但写法不完整: 例如 "ping 你还好吗"。
+     * 仍按普通聊天消息发送(绝不吞掉用户输入), 只额外给一句提示。
      */
     {
         size_t sp = line.find_first_of(" \t");

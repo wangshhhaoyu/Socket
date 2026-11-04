@@ -3,6 +3,12 @@
 基于 C++11 与**原生 Socket 函数**实现的多线程聊天系统，支持中英文混合聊天，
 并内置**丢包检测与统计**机制。
 
+**代码仓库**：<https://github.com/wangshhhaoyu/Socket.git> （分支 `main`）
+
+```bash
+git clone https://github.com/wangshhhaoyu/Socket.git
+```
+
 ---
 
 ## 一、目录结构

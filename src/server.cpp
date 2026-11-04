@@ -242,6 +242,55 @@ static void check_seq(const std::shared_ptr<Client> &c, unsigned seq) {
 /* ============================================================ 连接线程 */
 
 /* 处理一帧来自客户端的报文 */
+/*
+ * 修改昵称。
+ *
+ * 与"登录"严格区分开: 改名在服务器日志里只留下一条**独立的**记录,
+ * 其他在线用户收到的是"改名"通知, 而不是"加入了聊天室"——
+ * 否则一次改名会在所有人面前表现为"这个人刚上线", 语义完全错误。
+ *
+ * 改名者本人通过 MSG_NICK_ACK 收到生效的昵称(而不是广播), 避免重复提示。
+ */
+static void apply_nick_change(const std::shared_ptr<Client> &c, const std::string &want) {
+    std::string nick = want;
+
+    /* 去掉首尾空白 */
+    while (!nick.empty() && (nick[0] == ' ' || nick[0] == '\t'))
+        nick.erase(0, 1);
+    while (!nick.empty() && (nick[nick.size() - 1] == ' ' || nick[nick.size() - 1] == '\t'))
+        nick.erase(nick.size() - 1);
+
+    if (nick.empty()) {
+        /* 昵称非法: 不改动, 明确告知请求方 */
+        send_frame(c, MSG_NICK_ACK, "", now_ms(), "SERVER");
+        send_frame(c, MSG_SYSTEM, "昵称不能为空, 修改失败", now_ms(), "SERVER");
+        return;
+    }
+    if (nick.size() > MAX_SENDER_LEN) nick.resize(MAX_SENDER_LEN);
+
+    std::string old = c->nick;
+    c->nick = nick;
+
+    /* 服务器日志: 一条独立且语义明确的记录 */
+    log_line("用户 %s(id=%d) 将昵称改为 %s", old.c_str(), c->id, c->nick.c_str());
+
+    /*
+     * 先回复改名者本人(生效的昵称), 再广播给其他人。
+     * 这样改名者自己看到的顺序是"昵称已改为 X" -> "在线列表已更新",
+     * 而不是先看到列表变成新名字、却还没收到改名的确认。
+     */
+    send_frame(c, MSG_NICK_ACK, c->nick, now_ms(), "SERVER");
+
+    /* 通知其他在线用户 (排除改名者本人) */
+    char note[256];
+    snprintf(note, sizeof(note), "用户 %s(id=%d) 将昵称改为 %s",
+             old.c_str(), c->id, c->nick.c_str());
+    broadcast(MSG_SYSTEM, note, now_ms(), "SERVER", &c);
+
+    /* 在线列表里也要换成新名字 */
+    broadcast_user_list();
+}
+
 static void handle_message(const std::shared_ptr<Client> &c, Message &m) {
     c->last_active = time(NULL);
 
@@ -250,7 +299,18 @@ static void handle_message(const std::shared_ptr<Client> &c, Message &m) {
 
     switch (m.type) {
     case MSG_LOGIN_REQ: {
-        /* 载荷即昵称; 若为空(客户端未指定 -n)则按连接顺序分配默认名 pc1/pc2/pc3 */
+        /*
+         * 载荷即昵称; 若为空(客户端未指定 -n)则按连接顺序分配默认名 pc1/pc2/pc3
+         *
+         * 注意: 如果这条连接已经登录过, 说明客户端在用"再发一次 LOGIN_REQ"
+         * 的老办法改名。这里把它当成改名处理, 而不是重新登录 ——
+         * 否则会向所有人广播"xxx 加入了聊天室", 把改名说成登录。
+         */
+        if (c->logged_in) {
+            apply_nick_change(c, m.payload);
+            break;
+        }
+
         std::string nick = m.payload;
         if (nick.empty()) {
             char def[32];
@@ -277,6 +337,16 @@ static void handle_message(const std::shared_ptr<Client> &c, Message &m) {
         /* 通知所有人 */
         broadcast(MSG_SYSTEM, c->nick + " 加入了聊天室", now_ms(), "SERVER");
         broadcast_user_list();
+        break;
+    }
+
+    case MSG_NICK_CHANGE: {
+        /* 改名是控制类报文, 绝不能被当成"加入/离开"播报 */
+        if (!c->logged_in) {
+            send_frame(c, MSG_SYSTEM, "请先登录后再改名", now_ms(), "SERVER");
+            break;
+        }
+        apply_nick_change(c, m.payload);
         break;
     }
 

@@ -49,7 +49,9 @@ enum MessageType {
     MSG_PING        = 7,   /* 双向             : 心跳探测 */
     MSG_PONG        = 8,   /* 双向             : 心跳应答 */
     MSG_ACK         = 9,   /* 服务端 -> 客户端 : 应用层确认 (含被确认的序号) */
-    MSG_LOSS_REPORT = 10   /* 服务端 -> 客户端 : 丢包/序号缺失报告 */
+    MSG_LOSS_REPORT = 10,  /* 服务端 -> 客户端 : 丢包/序号缺失报告 */
+    MSG_NICK_CHANGE = 11,  /* 客户端 -> 服务端 : 请求修改昵称, payload = 新昵称 */
+    MSG_NICK_ACK    = 12   /* 服务端 -> 客户端 : 昵称修改结果, payload = 生效的新昵称 */
 };
 
 /* 负载中用于标记"丢包测试报文"的前缀 */

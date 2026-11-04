@@ -211,6 +211,20 @@ static void handle_server_msg(const Message &m) {
         break;
     }
 
+    case MSG_NICK_ACK: {
+        /*
+         * 服务端确认改名。载荷为生效后的昵称(空则表示被拒绝)。
+         * 只有拿到这个确认才回填本地昵称, 保证两端状态一致。
+         */
+        if (m.payload.empty()) {
+            out_printf("改名失败, 昵称保持不变\n");
+        } else {
+            nick_set(m.payload);
+            out_printf("昵称已改为 %s\n", m.payload.c_str());
+        }
+        break;
+    }
+
     case MSG_CHAT:
         show_chat(m);
         break;
@@ -410,8 +424,9 @@ static bool handle_input(const std::string &line) {
             }
             if (digits) n = (int)v;
             run_test(n);
-        } else if (line.compare(0, 6, "/nick ") == 0) {
-            std::string n = line.substr(6);
+        } else if (line.compare(0, 5, "/nick") == 0 &&
+                   (line.size() == 5 || line[5] == ' ' || line[5] == '\t')) {
+            std::string n = (line.size() > 6) ? line.substr(6) : std::string();
             /* 容错: 允许直接照抄 "/nick <名字>" 的写法, 去掉尖括号 */
             if (n.size() >= 2 && n[0] == '<' && n[n.size() - 1] == '>')
                 n = n.substr(1, n.size() - 2);
@@ -419,10 +434,17 @@ static bool handle_input(const std::string &line) {
                 out_printf("用法: /nick <名字>\n");
             } else {
                 if (n.size() > MAX_SENDER_LEN) n.resize(MAX_SENDER_LEN);
-                nick_set(n);
-                out_printf("昵称已改为 %s\n", n.c_str());
-                /* 重新登录以更新昵称 */
-                send_msg(MSG_LOGIN_REQ, n, now_ms(), n);
+                /*
+                 * 发送专用的改名报文 MSG_NICK_CHANGE。
+                 *
+                 * 这里刻意**不**复用 LOGIN_REQ: 用登录帧改名的话,
+                 * 服务端会把它当成一次新登录, 从而广播"xxx 加入了聊天室"——
+                 * 把改名说成了上线, 语义完全错误。
+                 *
+                 * 本地昵称也先不改, 等服务端的 MSG_NICK_ACK 回来再回填,
+                 * 这样即使服务端判定昵称非法, 两端状态也不会不一致。
+                 */
+                send_msg(MSG_NICK_CHANGE, n, now_ms(), nick_get());
             }
         } else if (line == "/stat") {
             print_stat();
